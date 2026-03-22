@@ -1,0 +1,9 @@
+---
+# Playbook: Doar pregătire sistem (fără instalare MicroK8s)
+
+- name: Pregătire toate nodurile
+  hosts: microk8s_cluster
+  become: yes
+  gather_facts: yes
+  roles:
+    - common

@@ -1,0 +1,97 @@
+---
+# Playbook: Diagnostic și troubleshooting cluster
+
+- name: Diagnostic MicroK8s Cluster
+  hosts: microk8s_cluster
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Verificare status MicroK8s
+      command: microk8s status
+      register: microk8s_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Status MicroK8s
+      debug:
+        var: microk8s_status.stdout_lines
+
+    - name: Verificare servicii MicroK8s
+      command: microk8s inspect
+      register: inspect_result
+      changed_when: false
+      ignore_errors: yes
+      when: inventory_hostname in groups['microk8s_masters']
+
+    - name: Inspecție servici
+      debug:
+        msg: "Raport inspecție salvat. Verifică output-ul pentru detalii."
+      when: inventory_hostname in groups['microk8s_masters']
+
+    - name: Verificare spațiu disk
+      command: df -h
+      register: disk_space
+      changed_when: false
+
+    - name: Spațiu disk
+      debug:
+        var: disk_space.stdout_lines
+
+    - name: Verificare memorie
+      command: free -h
+      register: memory
+      changed_when: false
+
+    - name: Memorie disponibilă
+      debug:
+        var: memory.stdout_lines
+
+    - name: Verificare procese MicroK8s
+      shell: ps aux | grep -E "(containerd|kubelet|kube-apiserver)" | head -20
+      register: processes
+      changed_when: false
+
+    - name: Procese active
+      debug:
+        var: processes.stdout_lines
+
+- name: Diagnostic cluster (doar pe master)
+  hosts: microk8s_masters
+  become: yes
+  tasks:
+    - name: Verificare noduri
+      command: microk8s kubectl get nodes -o wide
+      register: nodes
+      changed_when: false
+
+    - name: Status noduri
+      debug:
+        var: nodes.stdout_lines
+
+    - name: Verificare poduri toate namespace-urile
+      command: microk8s kubectl get pods -A -o wide
+      register: pods
+      changed_when: false
+
+    - name: Status poduri
+      debug:
+        var: pods.stdout_lines
+
+    - name: Verificare events recente
+      command: microk8s kubectl get events -A --sort-by='.metadata.creationTimestamp' | tail -30
+      register: events
+      changed_when: false
+
+    - name: Events recente
+      debug:
+        var: events.stdout_lines
+
+    - name: Verificare componente cluster
+      command: microk8s kubectl get componentstatuses
+      register: components
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Status componente
+      debug:
+        var: components.stdout_lines

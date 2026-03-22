@@ -1,0 +1,60 @@
+---
+# Playbook: Upgrade K3s Cluster
+# Rulare: ansible-playbook -i inventory/hosts.ini playbooks/upgrade.yml -e "k3s_version=v1.30.0+k3s1"
+
+- name: Upgrade K3s pe toate nodurile
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  serial: 1  # Upgrade secvențial pentru a evita downtime
+  tasks:
+    - name: Get current K3s version
+      command: k3s --version
+      register: current_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show current version
+      debug:
+        msg: "Current version: {{ current_version.stdout | default('Not installed') }}"
+
+    - name: Download K3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+
+    - name: Upgrade K3s server
+      shell: |
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        /tmp/k3s-install.sh
+      when: "'k3s_masters' in group_names"
+      register: server_upgrade
+
+    - name: Upgrade K3s agent
+      shell: |
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        K3S_URL="https://{{ hostvars[groups['k3s_masters'][0]]['ansible_host'] }}:6443" \
+        K3S_TOKEN="{{ hostvars[groups['k3s_masters'][0]]['k3s_node_token'] | default('') }}" \
+        INSTALL_K3S_EXEC="agent" \
+        /tmp/k3s-install.sh
+      when: "'k3s_workers' in group_names"
+      register: agent_upgrade
+
+    - name: Wait for node to be ready
+      command: kubectl get nodes
+      register: nodes_ready
+      until: nodes_ready.rc == 0
+      retries: 30
+      delay: 10
+      when: "'k3s_masters' in group_names"
+      changed_when: false
+
+    - name: Get new K3s version
+      command: k3s --version
+      register: new_version
+      changed_when: false
+
+    - name: Show new version
+      debug:
+        msg: "Upgraded to: {{ new_version.stdout }}"

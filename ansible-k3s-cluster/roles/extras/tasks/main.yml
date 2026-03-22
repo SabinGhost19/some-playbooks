@@ -1,0 +1,51 @@
+---
+# Role: extras - Instalare tool-uri adiționale
+
+- name: Install Helm
+  block:
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm.sh
+        mode: '0755'
+
+    - name: Install Helm
+      command: /tmp/get-helm.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Verify Helm installation
+      command: helm version --short
+      register: helm_version
+      changed_when: false
+
+    - name: Show Helm version
+      debug:
+        msg: "Helm installed: {{ helm_version.stdout }}"
+  when: install_helm | default(true)
+
+- name: Create kubectl alias for user
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "alias kubectl='k3s kubectl'"
+    state: present
+  when: install_kubectl_alias | default(true)
+
+- name: Create helm alias for user
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"
+    state: present
+
+- name: Add kubectl bash completion
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "source <(kubectl completion bash 2>/dev/null || true)"
+    state: present
+
+- name: Add helm bash completion
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "source <(helm completion bash 2>/dev/null || true)"
+    state: present
+  when: install_helm | default(true)

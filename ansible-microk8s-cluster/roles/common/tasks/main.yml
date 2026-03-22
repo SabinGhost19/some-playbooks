@@ -1,0 +1,113 @@
+---
+# Role: common - Pregătirea sistemului pentru MicroK8s
+
+- name: Actualizare cache apt
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Instalare pachete esențiale
+  apt:
+    name: "{{ additional_tools }}"
+    state: present
+  when: install_additional_tools | default(true)
+
+- name: Setare timezone
+  timezone:
+    name: "{{ timezone | default('Europe/Bucharest') }}"
+
+- name: Dezactivare swap
+  command: swapoff -a
+  when: disable_swap | default(true)
+  changed_when: false
+
+- name: Eliminare swap din fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '.*swap.*'
+    state: absent
+  when: disable_swap | default(true)
+
+- name: Încărcare module kernel necesare
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - br_netfilter
+    - overlay
+    - ip_vs
+    - ip_vs_rr
+    - ip_vs_wrr
+    - ip_vs_sh
+    - nf_conntrack
+  ignore_errors: yes
+
+- name: Persistență module kernel la reboot
+  copy:
+    content: |
+      br_netfilter
+      overlay
+      ip_vs
+      ip_vs_rr
+      ip_vs_wrr
+      ip_vs_sh
+      nf_conntrack
+    dest: /etc/modules-load.d/kubernetes.conf
+    mode: '0644'
+
+- name: Configurare parametri sysctl pentru Kubernetes
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+  loop:
+    - { key: 'net.ipv4.ip_forward', value: '1' }
+    - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+    - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+    - { key: 'vm.swappiness', value: '0' }
+    - { key: 'vm.overcommit_memory', value: '1' }
+    - { key: 'kernel.panic', value: '10' }
+    - { key: 'kernel.panic_on_oops', value: '1' }
+  ignore_errors: yes
+
+- name: Configurare limite sistem
+  pam_limits:
+    domain: '*'
+    limit_type: "{{ item.type }}"
+    limit_item: "{{ item.item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { type: 'soft', item: 'nofile', value: '65536' }
+    - { type: 'hard', item: 'nofile', value: '65536' }
+    - { type: 'soft', item: 'nproc', value: '65536' }
+    - { type: 'hard', item: 'nproc', value: '65536' }
+
+- name: Configurare /etc/hosts pentru noduri
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+    state: present
+  loop: "{{ groups['microk8s_cluster'] }}"
+
+- name: Verificare conectivitate între noduri
+  command: "ping -c 1 {{ hostvars[item]['ansible_host'] }}"
+  loop: "{{ groups['microk8s_cluster'] }}"
+  changed_when: false
+  ignore_errors: yes
+
+- name: Asigurare că snapd este instalat și rulează
+  apt:
+    name: snapd
+    state: present
+
+- name: Pornire și activare serviciu snapd
+  systemd:
+    name: snapd
+    state: started
+    enabled: yes
+
+- name: Așteptare pentru snapd să fie gata
+  command: snap wait system seed.loaded
+  changed_when: false

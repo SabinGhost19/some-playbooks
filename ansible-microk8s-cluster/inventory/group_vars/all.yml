@@ -1,0 +1,62 @@
+---
+# MicroK8s Configuration
+microk8s_version: "1.29/stable"  # Versiunea MicroK8s de instalat
+microk8s_channel: "{{ microk8s_version }}"
+
+# Addons de activat pe cluster
+microk8s_addons:
+  - dns
+  - dashboard
+  - ingress
+  - storage
+  - metrics-server
+  - rbac
+  - helm3
+  - registry
+  - hostpath-storage
+
+# Optional addons (decomentează dacă le dorești)
+# microk8s_optional_addons:
+#   - istio
+#   - prometheus
+#   - metallb
+
+# Configurări pentru cluster
+cluster_dns: "10.152.183.10"
+pod_network_cidr: "10.1.0.0/16"
+service_cidr: "10.152.183.0/24"
+
+# Swap dezactivat (recomandat pentru Kubernetes)
+disable_swap: true
+
+# Limitări de resurse (opțional)
+kubelet_max_pods: 110
+
+# Timezone
+timezone: "Europe/Bucharest"
+
+# Instalare tool-uri adiționale
+install_additional_tools: true
+additional_tools:
+  - htop
+  - iotop
+  - net-tools
+  - curl
+  - wget
+  - vim
+  - jq
+  - unzip
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+
+# Helm charts comune pentru K8s (opțional)
+install_common_helm_charts: false
+helm_charts:
+  - name: cert-manager
+    repo: https://charts.jetstack.io
+    namespace: cert-manager
+  - name: nginx-ingress
+    repo: https://kubernetes.github.io/ingress-nginx
+    namespace: ingress-nginx

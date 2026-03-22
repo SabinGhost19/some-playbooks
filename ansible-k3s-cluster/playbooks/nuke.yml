@@ -1,0 +1,111 @@
+---
+# =============================================================
+# PLAYBOOK: nuke.yml — Ștergere TOTALĂ K3s de pe toate nodurile
+# =============================================================
+#
+# ⚠️  ATENȚIE: Această operațiune este IREVERSIBILĂ!
+#     - Dezinstalează K3s complet (server + agent)
+#     - Șterge toate datele, certificatele, volumele
+#     - Curăță interfețele de rețea CNI/flannel
+#     - Resetează regulile iptables
+#     - Elimină helm, kubectl, crictl
+#
+# Rulare:
+#   ansible-playbook -i inventory/hosts.ini playbooks/nuke.yml
+#
+# Rulare cu confirmare explicită (recomandat în producție):
+#   ansible-playbook -i inventory/hosts.ini playbooks/nuke.yml -e "confirm_nuke=yes"
+# =============================================================
+
+# ─────────────────────────────────────────────────────────────
+# PASUL 0: Confirmare înainte de ștergere (safeguard)
+# ─────────────────────────────────────────────────────────────
+- name: "🔐 Confirmare operațiune NUKE"
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Verificare variabilă de confirmare
+      fail:
+        msg: |
+          ❌ OPERAȚIUNEA A FOST ANULATĂ!
+          
+          Această comandă șterge K3s COMPLET și IREVERSIBIL de pe TOATE nodurile.
+          
+          Pentru a confirma, rulează cu:
+            ansible-playbook -i inventory/hosts.ini playbooks/nuke.yml -e "confirm_nuke=yes"
+      when: confirm_nuke is not defined or confirm_nuke != "yes"
+
+# ─────────────────────────────────────────────────────────────
+# PASUL 1: Ștergere K3s de pe nodurile WORKER (agenți)
+#   → Se face PRIMA pentru a evita erori de drain
+# ─────────────────────────────────────────────────────────────
+- name: "🗑️  [1/2] Dezinstalare K3s AGENT (noduri worker)"
+  hosts: k3s_workers
+  become: yes
+  gather_facts: yes
+  serial: 1                  # Un nod pe rând pentru siguranță
+  any_errors_fatal: false
+
+  pre_tasks:
+    - name: Anunț începere pe worker
+      debug:
+        msg: "⏳ Se procesează worker: {{ inventory_hostname }} ({{ ansible_host }})"
+
+  roles:
+    - k3s-uninstall
+
+  post_tasks:
+    - name: Confirmare worker finalizat
+      debug:
+        msg: "✅ Worker {{ inventory_hostname }} — curățat cu succes!"
+
+# ─────────────────────────────────────────────────────────────
+# PASUL 2: Ștergere K3s de pe nodul MASTER (server)
+#   → Se face ULTIMA pentru că masterul ține starea clusterului
+# ─────────────────────────────────────────────────────────────
+- name: "🗑️  [2/2] Dezinstalare K3s SERVER (nod master)"
+  hosts: k3s_masters
+  become: yes
+  gather_facts: yes
+  any_errors_fatal: false
+
+  pre_tasks:
+    - name: Anunț începere pe master
+      debug:
+        msg: "⏳ Se procesează master: {{ inventory_hostname }} ({{ ansible_host }})"
+
+  roles:
+    - k3s-uninstall
+
+  post_tasks:
+    - name: Confirmare master finalizat
+      debug:
+        msg: "✅ Master {{ inventory_hostname }} — curățat cu succes!"
+
+# ─────────────────────────────────────────────────────────────
+# PASUL 3: Raport final
+# ─────────────────────────────────────────────────────────────
+- name: "📋 Raport final NUKE"
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Afișare raport
+      debug:
+        msg: |
+          ════════════════════════════════════════════
+          ✅  OPERAȚIUNEA NUKE FINALIZATĂ CU SUCCES!
+          ════════════════════════════════════════════
+          
+          K3s a fost eliminat complet de pe toate nodurile:
+            ✔  Servicii systemd oprite și șterse
+            ✔  Script-uri dezinstalare oficiale rulate
+            ✔  Binare (k3s, kubectl, crictl, helm) șterse
+            ✔  Date (/var/lib/rancher, /etc/rancher) șterse
+            ✔  Interfețe CNI/flannel eliminate
+            ✔  Reguli iptables resetate
+            ✔  Mountpoints reziduale unmountate
+            ✔  Kubeconfig-uri curățate
+          
+          Poți reinstala clusterul cu:
+            ansible-playbook -i inventory/hosts.ini playbooks/site.yml
+          ════════════════════════════════════════════

@@ -1,0 +1,80 @@
+---
+# Role: microk8s - Instalare și configurare MicroK8s
+
+- name: Check if microk8s is installed
+  command: snap list microk8s
+  register: microk8s_check
+  ignore_errors: yes
+  changed_when: false
+
+- name: Instalare MicroK8s via snap
+  command: snap install microk8s --classic --channel={{ microk8s_channel | default('1.29/stable') }}
+  when: microk8s_check.rc != 0
+
+- name: Așteptare pentru MicroK8s să fie gata
+  command: microk8s status --wait-ready
+  changed_when: false
+  retries: 10
+  delay: 30
+  register: microk8s_ready
+  until: microk8s_ready.rc == 0
+
+- name: Adăugare utilizator curent în grupul microk8s
+  user:
+    name: "{{ ansible_user }}"
+    groups: microk8s
+    append: yes
+
+- name: Creare director .kube pentru utilizator
+  file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Activare addons MicroK8s
+  command: "microk8s enable {{ item }}"
+  loop: "{{ microk8s_addons }}"
+  register: addon_result
+  changed_when: "'is already enabled' not in addon_result.stdout"
+  failed_when: addon_result.rc != 0 and 'is already enabled' not in addon_result.stdout
+
+- name: Așteptare pentru addons să fie gata
+  command: microk8s status --wait-ready
+  changed_when: false
+  retries: 5
+  delay: 30
+
+- name: Generare kubeconfig
+  shell: microk8s config > /home/{{ ansible_user }}/.kube/config
+  args:
+    creates: "/home/{{ ansible_user }}/.kube/config"
+
+- name: Setare permisiuni pentru kubeconfig
+  file:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+
+- name: Creare alias kubectl
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "alias kubectl='microk8s kubectl'"
+    state: present
+
+- name: Creare alias helm
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "alias helm='microk8s helm3'"
+    state: present
+
+- name: Verificare status MicroK8s
+  command: microk8s status
+  register: microk8s_status
+  changed_when: false
+
+- name: Afișare status MicroK8s
+  debug:
+    var: microk8s_status.stdout_lines

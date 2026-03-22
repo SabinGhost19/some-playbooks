@@ -1,0 +1,37 @@
+---
+- name: Create baseline LDAP groups and users in AD
+  hosts: windows_ad
+  gather_facts: false
+
+  tasks:
+    - name: Ensure AD groups exist
+      microsoft.ad.group:
+        name: "{{ item.name }}"
+        scope: "{{ item.scope | default('global') }}"
+        category: "{{ item.category | default('security') }}"
+        path: "{{ item.path }}"
+        state: present
+      loop: "{{ ad_groups | default([]) }}"
+
+    - name: Ensure AD users exist
+      microsoft.ad.user:
+        identity: "{{ item.name }}"
+        upn: "{{ item.upn }}"
+        path: "{{ item.path }}"
+        password: "{{ item.password }}"
+        state: present
+        enabled: true
+        password_never_expires: true
+      loop: "{{ ad_users | default([]) }}"
+
+    - name: Add users to groups
+      microsoft.ad.group:
+        name: "{{ group_name }}"
+        members:
+          add:
+            - "{{ user_item.name }}"
+        state: present
+      vars:
+        user_item: "{{ item.0 }}"
+        group_name: "{{ item.1 }}"
+      loop: "{{ ad_users | default([]) | subelements('groups', skip_missing=True) }}"

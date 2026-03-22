@@ -1,0 +1,83 @@
+---
+# =============================================================
+# PLAYBOOK: calico.yml — Instalare Calico CNI pe cluster K3s
+# =============================================================
+#
+# Ce face acest playbook:
+#  1. Reconfigurează K3s pe master pentru CNI extern:
+#     --flannel-backend=none + --disable-network-policy
+#  2. Restartează K3s și verifică explicit că nodurile trec în NotReady (fără CNI)
+#  3. Instalează Tigera Operator (Calico)
+#  4. Aplică custom-resources cu CIDR-ul corect al clusterului tău (10.42.0.0/16)
+#  5. Verifică că pod-urile calico-system sunt Running
+#
+# ⚠️  PREREQUISITE: Clusterul K3s trebuie să fie deja instalat!
+#     Dacă nu, rulează mai întâi: ansible-playbook -i inventory/hosts.ini playbooks/site.yml
+#
+# Rulare:
+#   ansible-playbook -i inventory/hosts.ini playbooks/calico.yml
+#
+# Rulare cu altă versiune de Calico:
+#   ansible-playbook -i inventory/hosts.ini playbooks/calico.yml -e "calico_version=v3.31.1"
+# =============================================================
+
+- name: "🔵 Instalare Calico CNI pe nodul master K3s"
+  hosts: k3s_masters
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+    - name: calico_confirm
+      prompt: |
+
+        ════════════════════════════════════════════
+        🔵 INSTALARE CALICO CNI
+        ════════════════════════════════════════════
+        Acest playbook va:
+          1. Reconfigura K3s pentru CNI extern:
+             --flannel-backend=none
+             --disable-network-policy
+          2. Restarta K3s (downtime ~30-60 secunde)
+          3. Verifica noduri in stare NotReady (normal fara CNI)
+          4. Instala Calico {{ calico_version | default('v3.31.0') }} pe cluster
+          5. Folosi CIDR: {{ pod_network_cidr | default('10.42.0.0/16') }}
+
+        Continui? (yes/no)
+      private: false
+
+  pre_tasks:
+    - name: Verificare confirmare
+      fail:
+        msg: "❌ Instalare anulată de utilizator."
+      when: calico_confirm != "yes"
+
+    - name: "📋 Info cluster înainte de instalare"
+      shell: k3s kubectl get nodes -o wide 2>/dev/null || echo "K3s not responding yet"
+      register: pre_nodes
+      changed_when: false
+      ignore_errors: true
+
+    - name: "📋 Noduri curente"
+      debug:
+        msg: "{{ pre_nodes.stdout_lines }}"
+
+  roles:
+    - calico
+
+  post_tasks:
+    - name: "📋 Status final cluster"
+      shell: |
+        echo "=== NODES ==="
+        k3s kubectl get nodes -o wide
+        echo ""
+        echo "=== CALICO PODS ==="
+        k3s kubectl get pods -n calico-system -o wide
+        echo ""
+        echo "=== CALICO NODE PODS ==="
+        k3s kubectl get pods -n calico-system -l k8s-app=calico-node -o wide 2>/dev/null || true
+      register: final_status
+      changed_when: false
+
+    - name: "📋 Raport status cluster"
+      debug:
+        msg: "{{ final_status.stdout_lines }}"

@@ -1,0 +1,67 @@
+---
+# Domain/Forest settings (as documented in keycloak-oauth2proxy-ad-DOC)
+domain_dns_name: licenta.ro
+domain_netbios_name: LICENTA
+domain_mode: WinThreshold
+forest_mode: WinThreshold
+safe_mode_password: "CHANGEME_DSRM_PASSWORD"
+
+# Optional DNS forwarders
+ad_dns_forwarders:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# LDAP/AD structure expected by Keycloak federation
+# Base DN: DC=licenta,DC=ro
+ad_groups:
+  - name: SG_ClusterAdmins
+    scope: global
+    category: security
+    path: "OU=GrupuriSecuritate,DC=licenta,DC=ro"
+  - name: SG_PlatformEngineers
+    scope: global
+    category: security
+    path: "OU=GrupuriSecuritate,DC=licenta,DC=ro"
+  - name: SG_JuniorDevs
+    scope: global
+    category: security
+    path: "OU=GrupuriSecuritate,DC=licenta,DC=ro"
+  - name: SG_NonTechnical
+    scope: global
+    category: security
+    path: "OU=GrupuriSecuritate,DC=licenta,DC=ro"
+
+ad_users:
+  - name: svc_keycloak_bind
+    upn: svc_keycloak_bind@licenta.ro
+    password: "CHANGEME_SVC_KEYCLOAK_BIND"
+    path: "OU=ServiceAccounts,DC=licenta,DC=ro"
+    groups: []
+
+  - name: alice
+    upn: alice@licenta.ro
+    password: "CHANGEME_ALICE_PASSWORD"
+    path: "OU=Angajati,DC=licenta,DC=ro"
+    groups:
+      - SG_ClusterAdmins
+
+  - name: sabin
+    upn: sabin@licenta.ro
+    password: "CHANGEME_SABIN_PASSWORD"
+    path: "OU=Angajati,DC=licenta,DC=ro"
+    groups:
+      - SG_PlatformEngineers
+
+  - name: bob
+    upn: bob@licenta.ro
+    password: "CHANGEME_BOB_PASSWORD"
+    path: "OU=Angajati,DC=licenta,DC=ro"
+    groups:
+      - SG_JuniorDevs
+
+  - name: eve
+    upn: eve@licenta.ro
+    password: "CHANGEME_EVE_PASSWORD"
+    path: "OU=Angajati,DC=licenta,DC=ro"
+    groups:
+      - SG_NonTechnical

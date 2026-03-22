@@ -1,0 +1,48 @@
+---
+# K3s Configuration Variables
+
+# Versiunea K3s de instalat (https://github.com/k3s-io/k3s/releases)
+k3s_version: "v1.35.2+k3s1"
+
+# Argumente pentru serverul K3s (master)
+# --disable traefik: Nu instalăm Traefik implicit (folosim nginx-ingress sau istio)
+# --disable servicelb: Nu folosim klipper-lb
+# --write-kubeconfig-mode 644: Permite citirea kubeconfig de non-root
+k3s_server_args: >-
+  --disable traefik
+  --disable servicelb
+  --write-kubeconfig-mode 644
+  --tls-san {{ hostvars[groups['k3s_masters'][0]]['ansible_host'] }}
+
+# Argumente pentru agenții K3s (workers)
+k3s_agent_args: ""
+
+# Rețea
+pod_network_cidr: "10.42.0.0/16"
+service_cidr: "10.43.0.0/16"
+
+# Sistem
+disable_swap: true
+timezone: "Europe/Bucharest"
+
+# Tool-uri adiționale
+install_helm: true
+install_kubectl_alias: true
+
+# Pachete de sistem necesare
+system_packages:
+  - curl
+  - wget
+  - vim
+  - jq
+  - unzip
+  - htop
+  - iotop
+  - net-tools
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+
+# Opțional: Instalare storage (Longhorn)
+install_longhorn: false

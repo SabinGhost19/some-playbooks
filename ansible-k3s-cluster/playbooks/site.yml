@@ -1,0 +1,76 @@
+---
+# Playbook principal: Instalare completă K3s Cluster
+# Rulare: ansible-playbook -i inventory/hosts.ini playbooks/site.yml
+
+- name: Pregătire toate nodurile
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  roles:
+    - common
+  tags:
+    - common
+    - prepare
+
+- name: Instalare K3s Server (Master Node)
+  hosts: k3s_masters
+  become: yes
+  gather_facts: yes
+  serial: 1
+  roles:
+    - k3s-server
+  tags:
+    - server
+    - master
+
+- name: Instalare K3s Agent (Worker Nodes)
+  hosts: k3s_workers
+  become: yes
+  gather_facts: yes
+  roles:
+    - k3s-agent
+  tags:
+    - agent
+    - worker
+
+- name: Instalare tool-uri adiționale pe Master
+  hosts: k3s_masters
+  become: yes
+  gather_facts: yes
+  roles:
+    - extras
+  tags:
+    - extras
+
+- name: Verificare finală cluster
+  hosts: k3s_masters
+  become: yes
+  tasks:
+    - name: Afișare informații cluster
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Status cluster
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+
+    - name: Afișare noduri
+      command: kubectl get nodes -o wide
+      register: nodes_info
+      changed_when: false
+
+    - name: Lista noduri
+      debug:
+        msg: "{{ nodes_info.stdout_lines }}"
+
+    - name: Afișare poduri sistem
+      command: kubectl get pods -A
+      register: pods_info
+      changed_when: false
+
+    - name: Lista poduri
+      debug:
+        msg: "{{ pods_info.stdout_lines }}"
+  tags:
+    - verify

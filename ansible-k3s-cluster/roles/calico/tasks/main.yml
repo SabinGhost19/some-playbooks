@@ -1,0 +1,306 @@
+---
+# Role: calico
+# Instalează Calico CNI pe un cluster K3s existent
+#
+# Ce face acest rol:
+#  1. Configurează K3s pentru CNI extern (flannel-backend=none + disable-network-policy)
+#  2. Restart K3s și verifică noduri NotReady (stare așteptată fără CNI)
+#  3. Instalează Tigera Operator (creierul Calico)
+#  4. Aplică custom-resources cu CIDR-ul corect al clusterului
+#  5. Verifică că pod-urile calico-system sunt Running
+
+# ─────────────────────────────────────────────────────
+# 1. RECONFIGURARE K3s — CNI extern (fără Flannel/Kube-router)
+# ─────────────────────────────────────────────────────
+
+- name: "[1/5] Verificare că K3s este instalat pe master"
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: "[1/5] Fail dacă K3s nu este instalat"
+  fail:
+    msg: |
+      ❌ K3s nu este instalat pe {{ inventory_hostname }}!
+      Rulează mai întâi: ansible-playbook playbooks/site.yml
+  when: not k3s_bin.stat.exists
+
+- name: "[1/5] Verificare flag disable-network-policy în config.yaml"
+  shell: grep -q '^disable-network-policy:\s*true' /etc/rancher/k3s/config.yaml 2>/dev/null && echo "exists" || echo "missing"
+  register: disable_network_policy_check
+  changed_when: false
+
+- name: "[1/5] Verificare flag flannel-backend: none în config.yaml"
+  shell: grep -q '^flannel-backend:\s*none' /etc/rancher/k3s/config.yaml 2>/dev/null && echo "exists" || echo "missing"
+  register: flannel_backend_none_check
+  changed_when: false
+
+- name: "[1/5] INFO — disable-network-policy deja configurat"
+  debug:
+    msg: "ℹ️  --disable-network-policy deja prezent în /etc/rancher/k3s/config.yaml. Sar peste."
+  when: disable_network_policy_check.stdout == "exists"
+
+- name: "[1/5] INFO — flannel-backend: none deja configurat"
+  debug:
+    msg: "ℹ️  flannel-backend: none deja prezent în /etc/rancher/k3s/config.yaml. Sar peste."
+  when: flannel_backend_none_check.stdout == "exists"
+
+- name: "[1/5] Adăugare disable-network-policy în /etc/rancher/k3s/config.yaml"
+  # Această abordare e recomandată oficial de K3s — mai robustă decât regex pe ExecStart
+  # K3s citește config.yaml automat la pornire
+  lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    line: "disable-network-policy: true"
+    create: yes
+    state: present
+  when: disable_network_policy_check.stdout == "missing"
+  register: disable_network_policy_config_modified
+
+- name: "[1/5] Adăugare flannel-backend: none în /etc/rancher/k3s/config.yaml"
+  lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    line: "flannel-backend: none"
+    create: yes
+    state: present
+  when: flannel_backend_none_check.stdout == "missing"
+  register: flannel_backend_config_modified
+
+# ─────────────────────────────────────────────────────
+# 2. RELOAD & RESTART K3s (doar dacă a fost modificat)
+# ─────────────────────────────────────────────────────
+
+- name: "[2/5] Reload systemd daemon"
+  systemd:
+    daemon_reload: yes
+  when:
+    - disable_network_policy_config_modified.changed | default(false) or flannel_backend_config_modified.changed | default(false)
+
+- name: "[2/5] Restart K3s service (aplică noua configurație)"
+  systemd:
+    name: k3s
+    state: restarted
+  when:
+    - disable_network_policy_config_modified.changed | default(false) or flannel_backend_config_modified.changed | default(false)
+
+- name: "[2/5] Așteptare K3s API server să fie disponibil (max 120s)"
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 6443
+    timeout: 120
+    delay: 10
+
+- name: "[2/5] Așteptare semnal NotReady pe cluster (așteptat până apare CNI)"
+  shell: |
+    for i in $(seq 1 36); do
+      TOTAL=$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)
+      READY_COUNT=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 ~ /^Ready/ {c++} END {print c+0}')
+      NOTREADY_COUNT=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 ~ /NotReady/ {c++} END {print c+0}')
+      if [ "$TOTAL" -gt 0 ] && [ "$NOTREADY_COUNT" -gt 0 ]; then
+        echo "NotReady detected: $NOTREADY_COUNT/$TOTAL (ready=$READY_COUNT)"
+        exit 0
+      fi
+      echo "Attempt $i: ready=$READY_COUNT notready=$NOTREADY_COUNT total=$TOTAL"
+      sleep 10
+    done
+    echo "Timeout waiting for at least one NotReady node before Calico installation"
+    exit 1
+  register: node_notready_check
+  changed_when: false
+  retries: 1
+  delay: 5
+
+- name: "[2/5] Status verificare NotReady"
+  debug:
+    msg: "{{ node_notready_check.stdout_lines }}"
+
+# ─────────────────────────────────────────────────────
+# 3. INSTALARE TIGERA OPERATOR
+# ─────────────────────────────────────────────────────
+
+- name: "[3/5] Verificare dacă Tigera Operator este deja instalat"
+  shell: k3s kubectl get namespace tigera-operator 2>/dev/null && echo "exists" || echo "missing"
+  register: tigera_ns_check
+  changed_when: false
+
+- name: "[3/5] Instalare Tigera Operator (creierul Calico)"
+  shell: |
+    k3s kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+  when: tigera_ns_check.stdout == "missing"
+  register: tigera_install
+  retries: 3
+  delay: 10
+  until: tigera_install.rc == 0
+
+- name: "[3/5] Așteptare ca CRD-urile Tigera să fie înregistrate"
+  shell: |
+    if k3s kubectl get crd installations.operator.tigera.io 2>/dev/null 1>/dev/null; then
+      echo "ready"
+    else
+      echo "not_ready"
+    fi
+  register: crd_check
+  until: crd_check.stdout.strip() == "ready"
+  retries: 40
+  delay: 10
+  changed_when: false
+
+# ─────────────────────────────────────────────────────
+# 4. APLICARE CUSTOM RESOURCES cu CIDR-ul corect
+# ─────────────────────────────────────────────────────
+
+- name: "[4/5] Descarcare custom-resources.yaml"
+  get_url:
+    url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml"
+    dest: /tmp/calico-custom-resources.yaml
+    mode: "0644"
+    force: yes
+
+- name: "[4/5] Patch CIDR în custom-resources.yaml ({{ pod_network_cidr }})"
+  replace:
+    path: /tmp/calico-custom-resources.yaml
+    # Calico vine cu 192.168.0.0/16 by default — înlocuim cu CIDR-ul K3s-ului nostru
+    regexp: 'cidr:\s*192\.168\.0\.0/16'
+    replace: "cidr: {{ pod_network_cidr }}"
+
+- name: "[4/5] Afișare custom-resources.yaml după patch"
+  shell: cat /tmp/calico-custom-resources.yaml
+  register: custom_resources_content
+  changed_when: false
+
+- name: "[4/5] Verificare CIDR patchat corect"
+  debug:
+    msg: "{{ custom_resources_content.stdout_lines }}"
+
+- name: "[4/5] Verificare dacă Installation Calico există deja"
+  shell: k3s kubectl get installation default 2>/dev/null && echo "exists" || echo "missing"
+  register: calico_install_check
+  changed_when: false
+
+- name: "[4/5] Aplicare custom-resources (Installation + IPPool cu CIDR {{ pod_network_cidr }})"
+  shell: k3s kubectl create -f /tmp/calico-custom-resources.yaml
+  when: calico_install_check.stdout == "missing"
+  register: custom_resources_apply
+  retries: 3
+  delay: 5
+  until: custom_resources_apply.rc == 0
+
+# ─────────────────────────────────────────────────────
+# 4b. FIX UBUNTU 22.04+ — iptables/nftables conflict
+# ─────────────────────────────────────────────────────
+# Ubuntu 22.04+ folosește nftables implicit. K3s/flannel lasă reguli nft reziduale.
+# Calico's Felix (felix) încearcă să folosească iptables-nft și intră în conflict.
+# Soluție: forțăm backend-ul Legacy iptables prin FelixConfiguration.
+
+- name: "[4b/5] Așteptare CRD FelixConfiguration să fie disponibil"
+  shell: |
+    if k3s kubectl get crd felixconfigurations.crd.projectcalico.org 2>/dev/null 1>/dev/null; then
+      echo "ready"
+    else
+      echo "not_ready"
+    fi
+  register: felix_crd_check
+  until: felix_crd_check.stdout.strip() == "ready"
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: "[4b/5] Verificare FelixConfiguration default existentă"
+  shell: |
+    if k3s kubectl get felixconfiguration default 2>/dev/null 1>/dev/null; then
+      echo "exists"
+    else
+      echo "missing"
+    fi
+  register: felix_config_exists
+  changed_when: false
+
+- name: "[4b/5] Configurare iptablesBackend Legacy (fix Ubuntu 22.04 nftables conflict)"
+  shell: |
+    k3s kubectl patch felixconfiguration default \
+      --type=merge \
+      -p '{"spec":{"iptablesBackend":"Legacy"}}'
+  when: felix_config_exists.stdout.strip() == "exists"
+  ignore_errors: true
+  register: felix_patch
+
+- name: "[4b/5] Creare FelixConfiguration dacă nu există deja"
+  shell: |
+    k3s kubectl apply -f - <<EOF
+    apiVersion: projectcalico.org/v3
+    kind: FelixConfiguration
+    metadata:
+      name: default
+    spec:
+      iptablesBackend: Legacy
+    EOF
+  when: felix_config_exists.stdout.strip() == "missing"
+  ignore_errors: true
+
+- name: "[4b/5] Restart calico-node DaemonSet pentru a aplica FelixConfiguration"
+  shell: k3s kubectl rollout restart daemonset calico-node -n calico-system
+  ignore_errors: true
+
+# ─────────────────────────────────────────────────────
+
+- name: "[5/5] Așteptare namespace calico-system să apară"
+  shell: |
+    if k3s kubectl get namespace calico-system 2>/dev/null 1>/dev/null; then
+      echo "exists"
+    else
+      echo "missing"
+    fi
+  register: calico_ns
+  until: calico_ns.stdout.strip() == "exists"
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: "[5/5] Așteptare pod-uri calico-system să fie Running (max 5 minute)"
+  shell: |
+    TOTAL=$(k3s kubectl get pods -n calico-system --no-headers 2>/dev/null | wc -l)
+    RUNNING=$(k3s kubectl get pods -n calico-system --no-headers 2>/dev/null | grep -c " Running " || true)
+    if [ "$TOTAL" -gt 0 ] && [ "$RUNNING" -eq "$TOTAL" ]; then
+      echo "all_running"
+    else
+      echo "waiting: $RUNNING/$TOTAL running"
+    fi
+  register: calico_pods_status
+  until: calico_pods_status.stdout.strip() == "all_running"
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: "[5/5] Afișare status pod-uri calico-system"
+  shell: k3s kubectl get pods -n calico-system -o wide
+  register: calico_pods_final
+  changed_when: false
+
+- name: "[5/5] Afișare status noduri cluster"
+  shell: k3s kubectl get nodes -o wide
+  register: nodes_status
+  changed_when: false
+
+- name: "[5/5] Curățare fișier temporar"
+  file:
+    path: /tmp/calico-custom-resources.yaml
+    state: absent
+
+- name: "[5/5] 🎉 Raport final Calico"
+  debug:
+    msg: |
+      ════════════════════════════════════════════════
+      ✅  CALICO INSTALAT CU SUCCES!
+      ════════════════════════════════════════════════
+
+      📦 Pod-uri calico-system:
+      {{ calico_pods_final.stdout }}
+
+      🖥️  Noduri cluster:
+      {{ nodes_status.stdout }}
+
+      🔧 Configurație aplicată:
+        • Versiune Calico : {{ calico_version }}
+        • Pod CIDR        : {{ pod_network_cidr }}
+        • K3s flags       : --flannel-backend=none --disable-network-policy ✔
+
+      ════════════════════════════════════════════════

@@ -1,0 +1,48 @@
+---
+# Playbook: Resetare completă MicroK8s (ATENȚIE: va șterge totul!)
+
+- name: Resetare MicroK8s pe toate nodurile
+  hosts: microk8s_cluster
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Confirmare resetare (safety check)
+      pause:
+        prompt: "ATENȚIE: Aceasta va șterge COMPLET MicroK8s și toate datele! Apasă Enter pentru a continua sau Ctrl+C pentru anulare"
+      run_once: true
+
+    - name: Leave cluster (pentru workers)
+      command: microk8s leave
+      ignore_errors: yes
+      when: inventory_hostname in groups['microk8s_workers']
+
+    - name: Remove nodes din cluster (pe master)
+      command: "microk8s remove-node {{ hostvars[item]['ansible_host'] }} --force"
+      loop: "{{ groups['microk8s_workers'] }}"
+      ignore_errors: yes
+      when: inventory_hostname in groups['microk8s_masters']
+
+    - name: Resetare MicroK8s
+      command: microk8s reset --destroy-storage
+      ignore_errors: yes
+
+    - name: Stop MicroK8s
+      command: microk8s stop
+      ignore_errors: yes
+
+    - name: Dezinstalare MicroK8s
+      snap:
+        name: microk8s
+        state: absent
+
+    - name: Cleanup directoare rămase
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/snap/microk8s
+        - "/home/{{ ansible_user }}/.kube"
+
+    - name: Mesaj finalizare
+      debug:
+        msg: "MicroK8s a fost complet dezinstalat de pe {{ inventory_hostname }}"

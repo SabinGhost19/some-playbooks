@@ -1,0 +1,130 @@
+---
+# Role: extras - Instalare tool-uri adiționale pentru Kubernetes
+
+- name: Instalare kubectl standalone (pentru acces remote)
+  block:
+    - name: Adăugare cheie GPG Kubernetes
+      apt_key:
+        url: https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key
+        keyring: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        state: present
+
+    - name: Adăugare repository Kubernetes
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
+        state: present
+        filename: kubernetes
+      ignore_errors: yes
+
+- name: Instalare k9s (Terminal UI pentru Kubernetes)
+  block:
+    - name: Download k9s
+      get_url:
+        url: "https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz"
+        dest: /tmp/k9s.tar.gz
+        mode: '0644'
+
+    - name: Extragere k9s
+      unarchive:
+        src: /tmp/k9s.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        creates: /usr/local/bin/k9s
+
+    - name: Setare permisiuni k9s
+      file:
+        path: /usr/local/bin/k9s
+        mode: '0755'
+
+- name: Instalare kubectx și kubens
+  block:
+    - name: Download kubectx
+      get_url:
+        url: "https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubectx_v0.9.5_linux_x86_64.tar.gz"
+        dest: /tmp/kubectx.tar.gz
+        mode: '0644'
+
+    - name: Download kubens
+      get_url:
+        url: "https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubens_v0.9.5_linux_x86_64.tar.gz"
+        dest: /tmp/kubens.tar.gz
+        mode: '0644'
+
+    - name: Extragere kubectx
+      unarchive:
+        src: /tmp/kubectx.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        creates: /usr/local/bin/kubectx
+
+    - name: Extragere kubens
+      unarchive:
+        src: /tmp/kubens.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        creates: /usr/local/bin/kubens
+
+- name: Instalare stern (multi-pod log tailing)
+  block:
+    - name: Download stern
+      get_url:
+        url: "https://github.com/stern/stern/releases/download/v1.28.0/stern_1.28.0_linux_amd64.tar.gz"
+        dest: /tmp/stern.tar.gz
+        mode: '0644'
+
+    - name: Extragere stern
+      unarchive:
+        src: /tmp/stern.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+        creates: /usr/local/bin/stern
+
+    - name: Setare permisiuni stern
+      file:
+        path: /usr/local/bin/stern
+        mode: '0755'
+
+- name: Configurare kubectl completion pentru bash
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "source <(microk8s kubectl completion bash)"
+    state: present
+
+- name: Configurare helm completion pentru bash
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "source <(microk8s helm3 completion bash)"
+    state: present
+
+- name: Creare alias-uri utile
+  blockinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    block: |
+      # Kubernetes Aliases
+      alias k='microk8s kubectl'
+      alias kgp='microk8s kubectl get pods'
+      alias kgs='microk8s kubectl get svc'
+      alias kgn='microk8s kubectl get nodes'
+      alias kga='microk8s kubectl get all'
+      alias kgaa='microk8s kubectl get all --all-namespaces'
+      alias kdp='microk8s kubectl describe pod'
+      alias kds='microk8s kubectl describe svc'
+      alias kdn='microk8s kubectl describe node'
+      alias kl='microk8s kubectl logs'
+      alias klf='microk8s kubectl logs -f'
+      alias kex='microk8s kubectl exec -it'
+      alias kaf='microk8s kubectl apply -f'
+      alias kdf='microk8s kubectl delete -f'
+      alias kctx='kubectx'
+      alias kns='kubens'
+    marker: "# {mark} ANSIBLE MANAGED K8S ALIASES"
+
+- name: Cleanup fișiere temporare
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/k9s.tar.gz
+    - /tmp/kubectx.tar.gz
+    - /tmp/kubens.tar.gz
+    - /tmp/stern.tar.gz

@@ -1,0 +1,4 @@
+---
+# Versiunea Calico de instalat
+# Verifică ultimele versiuni la: https://github.com/projectcalico/calico/releases
+calico_version: "v3.31.0"

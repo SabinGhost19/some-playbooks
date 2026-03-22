@@ -1,0 +1,49 @@
+---
+- name: Install and configure Active Directory Domain Services on Windows Server 2022
+  hosts: windows_ad
+  gather_facts: false
+  vars:
+    domain_dn: "DC={{ domain_dns_name.split('.')[0] }},DC={{ domain_dns_name.split('.')[1] }}"
+
+  tasks:
+    - name: Install AD DS and DNS features
+      ansible.windows.win_feature:
+        name:
+          - AD-Domain-Services
+          - DNS
+        state: present
+        include_management_tools: true
+      register: ad_features
+
+    - name: Promote server to domain controller and create new forest
+      microsoft.ad.domain:
+        dns_domain_name: "{{ domain_dns_name }}"
+        domain_netbios_name: "{{ domain_netbios_name }}"
+        safe_mode_password: "{{ safe_mode_password }}"
+        forest_mode: "{{ forest_mode }}"
+        domain_mode: "{{ domain_mode }}"
+        install_dns: true
+      register: ad_domain
+
+    - name: Reboot after AD DS promotion when required
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+        post_reboot_delay: 45
+      when: ad_domain.reboot_required | default(false)
+
+    - name: Ensure DNS forwarders are configured
+      ansible.windows.win_powershell:
+        script: |
+          $forwarders = @({{ ad_dns_forwarders | map('to_json') | join(',') }})
+          Set-DnsServerForwarder -IPAddress $forwarders -PassThru
+      when: ad_dns_forwarders is defined and ad_dns_forwarders | length > 0
+
+    - name: Create base OUs for identity bootstrap
+      microsoft.ad.ou:
+        name: "{{ item }}"
+        path: "{{ domain_dn }}"
+        state: present
+      loop:
+        - Angajati
+        - GrupuriSecuritate
+        - ServiceAccounts

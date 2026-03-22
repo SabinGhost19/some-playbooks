@@ -1,0 +1,60 @@
+---
+# Playbook: Dezinstalare completă K3s Cluster
+# Rulare: ansible-playbook -i inventory/hosts.ini playbooks/reset.yml
+
+- name: Dezinstalare K3s de pe toate nodurile
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Check if K3s uninstall script exists (agent)
+      stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: k3s_agent_uninstall
+
+    - name: Uninstall K3s agent
+      command: /usr/local/bin/k3s-agent-uninstall.sh
+      when: k3s_agent_uninstall.stat.exists
+      ignore_errors: yes
+
+    - name: Check if K3s uninstall script exists (server)
+      stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: k3s_server_uninstall
+
+    - name: Uninstall K3s server
+      command: /usr/local/bin/k3s-uninstall.sh
+      when: k3s_server_uninstall.stat.exists
+      ignore_errors: yes
+
+    - name: Remove K3s data directory
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/rancher
+        - /etc/rancher
+        - /var/lib/kubelet
+        - /var/lib/cni
+        - /etc/cni
+      ignore_errors: yes
+
+    - name: Remove user kubeconfig
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: absent
+
+    - name: Remove kubectl/helm aliases from bashrc
+      lineinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - "alias kubectl"
+        - "alias helm"
+        - "KUBECONFIG"
+        - "completion bash"
+
+    - name: Confirm uninstall
+      debug:
+        msg: "K3s has been uninstalled from {{ inventory_hostname }}"

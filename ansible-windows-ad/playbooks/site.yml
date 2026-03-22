@@ -1,0 +1,3 @@
+---
+- import_playbook: 02-install-ad-ds.yml
+- import_playbook: 03-bootstrap-ldap-objects.yml

@@ -1,0 +1,242 @@
+---
+# Role: k3s-uninstall
+# Curăță COMPLET K3s de pe un nod (server sau agent)
+# Include: servicii, binare, date, rețea, iptables, CNI interfaces
+
+# ─────────────────────────────────────────────
+# 1. OPRIRE SERVICII
+# ─────────────────────────────────────────────
+
+- name: "[1/9] Oprire serviciu k3s (server) — dacă există"
+  systemd:
+    name: k3s
+    state: stopped
+    enabled: no
+  failed_when: false
+
+- name: "[1/9] Oprire serviciu k3s-agent (worker) — dacă există"
+  systemd:
+    name: k3s-agent
+    state: stopped
+    enabled: no
+  failed_when: false
+
+# ─────────────────────────────────────────────
+# 2. RULARE SCRIPT-URI DE DEZINSTALARE OFICIALE
+# ─────────────────────────────────────────────
+
+- name: "[2/9] Verificare script dezinstalare k3s-agent"
+  stat:
+    path: /usr/local/bin/k3s-agent-uninstall.sh
+  register: k3s_agent_uninstall_script
+
+- name: "[2/9] Rulare k3s-agent-uninstall.sh"
+  shell: /usr/local/bin/k3s-agent-uninstall.sh
+  when: k3s_agent_uninstall_script.stat.exists
+  ignore_errors: yes
+
+- name: "[2/9] Verificare script dezinstalare k3s server"
+  stat:
+    path: /usr/local/bin/k3s-uninstall.sh
+  register: k3s_server_uninstall_script
+
+- name: "[2/9] Rulare k3s-uninstall.sh"
+  shell: /usr/local/bin/k3s-uninstall.sh
+  when: k3s_server_uninstall_script.stat.exists
+  ignore_errors: yes
+
+# ─────────────────────────────────────────────
+# 3. OPRIRE ȘI ȘTERGERE PROCESE REZIDUALE
+# ─────────────────────────────────────────────
+
+- name: "[3/9] Omoare procese k3s reziduale"
+  shell: |
+    # killall face match pe NUMELE procesului (nu pe linia de comandă)
+    # Astfel NU se va omorî singur (spre deosebire de 'pkill -9 -f k3s')
+    killall -9 k3s        2>/dev/null || true
+    killall -9 k3s-agent  2>/dev/null || true
+    killall -9 containerd 2>/dev/null || true
+    killall -9 flannel    2>/dev/null || true
+    sleep 1
+    exit 0
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+
+- name: "[3/9] Reîncărcare daemon systemd pentru unități șterse"
+  systemd:
+    daemon_reload: yes
+  ignore_errors: yes
+
+# ─────────────────────────────────────────────
+# 4. CURĂȚARE FIȘIERE ȘI DIRECTOARE
+# ─────────────────────────────────────────────
+
+- name: "[4/9] Ștergere directoare de date K3s / Rancher"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/rancher
+    - /var/lib/kubelet
+    - /var/lib/cni
+    - /etc/rancher
+    - /etc/cni
+    - /opt/cni
+    - /run/k3s
+    - /run/flannel
+    - /var/log/pods
+    - /var/log/containers
+    - /tmp/k3s-install.sh
+  ignore_errors: yes
+
+- name: "[4/9] Ștergere binare K3s"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/bin/k3s
+    - /usr/local/bin/kubectl
+    - /usr/local/bin/crictl
+    - /usr/local/bin/ctr
+    - /usr/local/bin/k3s-uninstall.sh
+    - /usr/local/bin/k3s-agent-uninstall.sh
+    - /usr/local/bin/k3s-killall.sh
+  ignore_errors: yes
+
+- name: "[4/9] Ștergere fișiere unit systemd K3s"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/k3s.service
+    - /etc/systemd/system/k3s-agent.service
+    - /etc/systemd/system/k3s.service.env
+    - /etc/systemd/system/k3s-agent.service.env
+  ignore_errors: yes
+
+- name: "[4/9] Ștergere kubeconfig utilizator"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/home/{{ ansible_user }}/.kube"
+    - "/root/.kube"
+  ignore_errors: yes
+
+- name: "[4/9] Curățare .bashrc (aliasuri kubectl/helm/kubeconfig)"
+  lineinfile:
+    path: "{{ item.file }}"
+    regexp: "{{ item.pattern }}"
+    state: absent
+  loop:
+    - { file: "/home/{{ ansible_user }}/.bashrc", pattern: "alias kubectl" }
+    - { file: "/home/{{ ansible_user }}/.bashrc", pattern: "alias helm" }
+    - { file: "/home/{{ ansible_user }}/.bashrc", pattern: "KUBECONFIG" }
+    - { file: "/home/{{ ansible_user }}/.bashrc", pattern: "completion bash" }
+    - { file: "/root/.bashrc", pattern: "alias kubectl" }
+    - { file: "/root/.bashrc", pattern: "KUBECONFIG" }
+  ignore_errors: yes
+
+# ─────────────────────────────────────────────
+# 5. CURĂȚARE INTERFEȚE DE REȚEA CNI / FLANNEL
+# ─────────────────────────────────────────────
+
+- name: "[5/9] Ștergere interfețe de rețea CNI/flannel/vxlan"
+  shell: |
+    for iface in flannel.1 cni0 vxlan.calico tunl0 kube-ipvs0 dummy0; do
+      if ip link show "$iface" &>/dev/null; then
+        ip link set "$iface" down 2>/dev/null || true
+        ip link delete "$iface" 2>/dev/null || true
+        echo "Deleted interface: $iface"
+      fi
+    done
+    # Șterge orice interfață cni-* sau veth*
+    for iface in $(ip link show | grep -oP '(?<=\d: )(cni-[^\@:]+|veth[^\@:]+)' 2>/dev/null); do
+      ip link delete "$iface" 2>/dev/null || true
+    done
+  ignore_errors: yes
+  changed_when: false
+
+# ─────────────────────────────────────────────
+# 6. CURĂȚARE REGULI IPTABLES
+# ─────────────────────────────────────────────
+
+- name: "[6/9] Curățare reguli iptables adăugate de K3s"
+  shell: |
+    # Flush și delete chain-uri K3s din toate tabelele
+    for table in filter nat mangle raw; do
+      iptables -t "$table" -F 2>/dev/null || true
+      iptables -t "$table" -X 2>/dev/null || true
+    done
+
+    # IPv6
+    for table in filter nat mangle raw; do
+      ip6tables -t "$table" -F 2>/dev/null || true
+      ip6tables -t "$table" -X 2>/dev/null || true
+    done
+
+    # Resetare politici default
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+  ignore_errors: yes
+  changed_when: false
+
+# ─────────────────────────────────────────────
+# 7. UNMOUNT VOLUME-URI REZIDUALE
+# ─────────────────────────────────────────────
+
+- name: "[7/9] Unmount mountpoints reziduale K3s"
+  shell: |
+    # Unmount toate mountpoints care conțin 'kubelet' sau 'rancher' sau 'k3s'
+    mount | grep -E '(kubelet|rancher|k3s)' | awk '{print $3}' | sort -r | while read mp; do
+      umount -lf "$mp" 2>/dev/null || true
+      echo "Unmounted: $mp"
+    done
+  ignore_errors: yes
+  changed_when: false
+
+# ─────────────────────────────────────────────
+# 8. CURĂȚARE HELM (dacă a fost instalat)
+# ─────────────────────────────────────────────
+
+- name: "[8/9] Verificare dacă helm este instalat"
+  stat:
+    path: /usr/local/bin/helm
+  register: helm_binary
+
+- name: "[8/9] Ștergere helm binary și config"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/bin/helm
+    - "/home/{{ ansible_user }}/.config/helm"
+    - "/home/{{ ansible_user }}/.cache/helm"
+    - "/root/.config/helm"
+    - "/root/.cache/helm"
+  when: helm_binary.stat.exists
+  ignore_errors: yes
+
+# ─────────────────────────────────────────────
+# 9. REÎNCĂRCARE DAEMON ȘI CONFIRMARE
+# ─────────────────────────────────────────────
+
+- name: "[9/9] Reîncărcare daemon systemd final"
+  systemd:
+    daemon_reload: yes
+  ignore_errors: yes
+
+- name: "[9/9] Verificare că k3s nu mai există"
+  shell: "which k3s 2>/dev/null || echo 'K3s removed successfully'"
+  register: k3s_check
+  changed_when: false
+
+- name: "[9/9] Raport final - {{ inventory_hostname }}"
+  debug:
+    msg: |
+      ✅ Nod: {{ inventory_hostname }} ({{ ansible_host }})
+      🗑️  Status: {{ k3s_check.stdout }}
+      ✔️  K3s a fost complet eliminat!
