@@ -66,6 +66,44 @@
   register: flannel_backend_config_modified
 
 # ─────────────────────────────────────────────────────
+# 1b. CURĂȚARE FLANNEL RĂMĂȘIȚE (înainte de restart)
+# ─────────────────────────────────────────────────────
+
+- name: "[1b/5] Detectare interfețe Flannel existente"
+  shell: ip link show 2>/dev/null | grep -E 'flannel|cni|tunl|vxlan' | awk '{print $2}' | tr -d ':' || echo ""
+  register: flannel_interfaces
+  changed_when: false
+
+- name: "[1b/5] Curățare interfețe Flannel"
+  shell: |
+    for iface in {{ flannel_interfaces.stdout_lines | join(' ') }}; do
+      ip link delete "$iface" 2>/dev/null || true
+    done
+  when: flannel_interfaces.stdout | length > 0
+  ignore_errors: true
+
+- name: "[1b/5] Curățare reguli iptables Flannel"
+  shell: |
+    iptables-save 2>/dev/null | grep -v flannel | grep -v CNI | iptables-restore 2>/dev/null || true
+    ip6tables-save 2>/dev/null | grep -v flannel | grep -v CNI | ip6tables-restore 2>/dev/null || true
+  ignore_errors: true
+
+- name: "[1b/5] Curățare reguli nftables Flannel"
+  shell: |
+    nft flush table ip filter 2>/dev/null || true
+    nft flush table ip6 filter 2>/dev/null || true
+  ignore_errors: true
+
+- name: "[1b/5] Ștergere configurări CNI vechi"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/cni/net.d
+    - /var/lib/cni
+  ignore_errors: true
+
+# ─────────────────────────────────────────────────────
 # 2. RELOAD & RESTART K3s (doar dacă a fost modificat)
 # ─────────────────────────────────────────────────────
 
@@ -185,61 +223,7 @@
   until: custom_resources_apply.rc == 0
 
 # ─────────────────────────────────────────────────────
-# 4b. FIX UBUNTU 22.04+ — iptables/nftables conflict
-# ─────────────────────────────────────────────────────
-# Ubuntu 22.04+ folosește nftables implicit. K3s/flannel lasă reguli nft reziduale.
-# Calico's Felix (felix) încearcă să folosească iptables-nft și intră în conflict.
-# Soluție: forțăm backend-ul Legacy iptables prin FelixConfiguration.
-
-- name: "[4b/5] Așteptare CRD FelixConfiguration să fie disponibil"
-  shell: |
-    if k3s kubectl get crd felixconfigurations.crd.projectcalico.org 2>/dev/null 1>/dev/null; then
-      echo "ready"
-    else
-      echo "not_ready"
-    fi
-  register: felix_crd_check
-  until: felix_crd_check.stdout.strip() == "ready"
-  retries: 30
-  delay: 10
-  changed_when: false
-
-- name: "[4b/5] Verificare FelixConfiguration default existentă"
-  shell: |
-    if k3s kubectl get felixconfiguration default 2>/dev/null 1>/dev/null; then
-      echo "exists"
-    else
-      echo "missing"
-    fi
-  register: felix_config_exists
-  changed_when: false
-
-- name: "[4b/5] Configurare iptablesBackend Legacy (fix Ubuntu 22.04 nftables conflict)"
-  shell: |
-    k3s kubectl patch felixconfiguration default \
-      --type=merge \
-      -p '{"spec":{"iptablesBackend":"Legacy"}}'
-  when: felix_config_exists.stdout.strip() == "exists"
-  ignore_errors: true
-  register: felix_patch
-
-- name: "[4b/5] Creare FelixConfiguration dacă nu există deja"
-  shell: |
-    k3s kubectl apply -f - <<EOF
-    apiVersion: projectcalico.org/v3
-    kind: FelixConfiguration
-    metadata:
-      name: default
-    spec:
-      iptablesBackend: Legacy
-    EOF
-  when: felix_config_exists.stdout.strip() == "missing"
-  ignore_errors: true
-
-- name: "[4b/5] Restart calico-node DaemonSet pentru a aplica FelixConfiguration"
-  shell: k3s kubectl rollout restart daemonset calico-node -n calico-system
-  ignore_errors: true
-
+# 5. AȘTEPTARE CALICO ȘI CONFIGURARE IP DETECTION
 # ─────────────────────────────────────────────────────
 
 - name: "[5/5] Așteptare namespace calico-system să apară"
