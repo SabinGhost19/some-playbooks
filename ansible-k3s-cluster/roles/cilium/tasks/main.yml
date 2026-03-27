@@ -1,0 +1,308 @@
+---
+# Role: cilium
+# Instalează Cilium CNI pe un cluster K3s existent
+#
+# Ce face acest rol:
+#  1. Verifică pre-requisituri (kernel version pentru eBPF)
+#  2. Configurează K3s pentru CNI extern (flannel-backend=none + disable-network-policy)
+#  3. Restart K3s și verifică noduri NotReady (stare așteptată fără CNI)
+#  4. Instalează Cilium CLI pe master
+#  5. Instalează Cilium CNI via Helm/CLI
+#  6. Verifică că Cilium este Running și nodurile devin Ready
+
+# ─────────────────────────────────────────────────────
+# 1. VERIFICARE PRE-REQUISITURI
+# ─────────────────────────────────────────────────────
+
+- name: "[1/7] Verificare că K3s este instalat pe master"
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: "[1/7] Fail dacă K3s nu este instalat"
+  fail:
+    msg: |
+      ❌ K3s nu este instalat pe {{ inventory_hostname }}!
+      Rulează mai întâi: ansible-playbook playbooks/site.yml
+  when: not k3s_bin.stat.exists
+
+- name: "[1/7] Verificare versiune kernel (eBPF support)"
+  shell: uname -r | cut -d'-' -f1
+  register: kernel_version
+  changed_when: false
+
+- name: "[1/7] Extrage versiunea kernel ca număr"
+  set_fact:
+    kernel_major: "{{ kernel_version.stdout.split('.')[0] | int }}"
+    kernel_minor: "{{ kernel_version.stdout.split('.')[1] | int }}"
+
+- name: "[1/7] Warning dacă kernel < 5.10 (eBPF limitat)"
+  debug:
+    msg: |
+      ⚠️  ATENȚIE: Kernel {{ kernel_version.stdout }} detectat!
+      Cilium funcționează optim cu kernel 5.10+ pentru toate feature-urile eBPF.
+      Versiuni mai vechi pot avea limitări de performanță sau funcționalitate.
+  when: (kernel_major | int < 5) or (kernel_major | int == 5 and kernel_minor | int < 10)
+
+- name: "[1/7] Verificare flag disable-network-policy în config.yaml"
+  shell: grep -q '^disable-network-policy:\s*true' /etc/rancher/k3s/config.yaml 2>/dev/null && echo "exists" || echo "missing"
+  register: disable_network_policy_check
+  changed_when: false
+
+- name: "[1/7] Verificare flag flannel-backend: none în config.yaml"
+  shell: grep -q '^flannel-backend:\s*none' /etc/rancher/k3s/config.yaml 2>/dev/null && echo "exists" || echo "missing"
+  register: flannel_backend_none_check
+  changed_when: false
+
+# ─────────────────────────────────────────────────────
+# 2. CONFIGURARE K3s PENTRU CNI EXTERN
+# ─────────────────────────────────────────────────────
+
+- name: "[2/7] Adăugare disable-network-policy în /etc/rancher/k3s/config.yaml"
+  lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    line: "disable-network-policy: true"
+    create: yes
+    state: present
+  when: disable_network_policy_check.stdout == "missing"
+  register: disable_network_policy_config_modified
+
+- name: "[2/7] Adăugare flannel-backend: none în /etc/rancher/k3s/config.yaml"
+  lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    line: "flannel-backend: none"
+    create: yes
+    state: present
+  when: flannel_backend_none_check.stdout == "missing"
+  register: flannel_backend_config_modified
+
+# ─────────────────────────────────────────────────────
+# 3. CURĂȚARE FLANNEL RĂMĂȘIȚE (înainte de restart)
+# ─────────────────────────────────────────────────────
+
+- name: "[3/7] Detectare interfețe Flannel existente"
+  shell: ip link show 2>/dev/null | grep -E 'flannel|cni|tunl|vxlan' | awk '{print $2}' | tr -d ':' || echo ""
+  register: flannel_interfaces
+  changed_when: false
+
+- name: "[3/7] Curățare interfețe Flannel"
+  shell: |
+    for iface in {{ flannel_interfaces.stdout_lines | join(' ') }}; do
+      ip link delete "$iface" 2>/dev/null || true
+    done
+  when: flannel_interfaces.stdout | length > 0
+  ignore_errors: true
+
+- name: "[3/7] Curățare reguli iptables Flannel"
+  shell: |
+    iptables-save 2>/dev/null | grep -v flannel | grep -v CNI | iptables-restore 2>/dev/null || true
+    ip6tables-save 2>/dev/null | grep -v flannel | grep -v CNI | ip6tables-restore 2>/dev/null || true
+  ignore_errors: true
+
+- name: "[3/7] Ștergere configurări CNI vechi"
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/cni/net.d
+    - /var/lib/cni
+  ignore_errors: true
+
+# ─────────────────────────────────────────────────────
+# 4. RELOAD & RESTART K3s
+# ─────────────────────────────────────────────────────
+
+- name: "[4/7] Reload systemd daemon"
+  systemd:
+    daemon_reload: yes
+  when:
+    - disable_network_policy_config_modified.changed | default(false) or flannel_backend_config_modified.changed | default(false)
+
+- name: "[4/7] Restart K3s service (aplică noua configurație)"
+  systemd:
+    name: k3s
+    state: restarted
+  when:
+    - disable_network_policy_config_modified.changed | default(false) or flannel_backend_config_modified.changed | default(false)
+
+- name: "[4/7] Așteptare K3s API server să fie disponibil (max 120s)"
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: 6443
+    timeout: 120
+    delay: 10
+
+- name: "[4/7] Așteptare semnal NotReady pe cluster (așteptat până apare CNI)"
+  shell: |
+    for i in $(seq 1 36); do
+      TOTAL=$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)
+      READY_COUNT=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 ~ /^Ready/ {c++} END {print c+0}')
+      NOTREADY_COUNT=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 ~ /NotReady/ {c++} END {print c+0}')
+      if [ "$TOTAL" -gt 0 ] && [ "$NOTREADY_COUNT" -gt 0 ]; then
+        echo "NotReady detected: $NOTREADY_COUNT/$TOTAL (ready=$READY_COUNT)"
+        exit 0
+      fi
+      echo "Attempt $i: ready=$READY_COUNT notready=$NOTREADY_COUNT total=$TOTAL"
+      sleep 10
+    done
+    echo "Timeout waiting for at least one NotReady node before Cilium installation"
+    exit 1
+  register: node_notready_check
+  changed_when: false
+  retries: 1
+  delay: 5
+
+# ─────────────────────────────────────────────────────
+# 5. INSTALARE CILIUM CLI
+# ─────────────────────────────────────────────────────
+
+- name: "[5/7] Verificare dacă Cilium CLI este deja instalat"
+  stat:
+    path: /usr/local/bin/cilium
+  register: cilium_cli_bin
+
+- name: "[5/7] Descarcă și instalează Cilium CLI"
+  shell: |
+    CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+    CLI_ARCH=amd64
+    if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+    curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+    sha256sum --check cilium-linux-${CLI_ARCH}.tar.gz.sha256sum
+    sudo tar xzvfC cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+    rm cilium-linux-${CLI_ARCH}.tar.gz{,.sha256sum}
+  when: not cilium_cli_bin.stat.exists
+  register: cilium_cli_install
+
+# ─────────────────────────────────────────────────────
+# 6. INSTALARE CILIUM CNI
+# ─────────────────────────────────────────────────────
+
+- name: "[6/7] Verificare dacă Cilium este deja instalat"
+  shell: |
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    cilium status 2>/dev/null | grep -q "Cilium:" && echo "installed" || echo "not_installed"
+  register: cilium_check
+  changed_when: false
+  ignore_errors: true
+
+- name: "[6/7] Instalare Cilium CNI cu toate feature-urile"
+  shell: |
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    {% if cilium_k8s_service_host | length > 0 %}
+    K8S_HOST="{{ cilium_k8s_service_host }}"
+    {% else %}
+    K8S_HOST="{{ ansible_host }}"
+    {% endif %}
+    cilium install --version {{ cilium_version }} \
+      --set kubeProxyReplacement={{ cilium_kube_proxy_replacement }} \
+      --set k8sServiceHost=$K8S_HOST \
+      --set k8sServicePort={{ cilium_k8s_service_port }} \
+      --set l2announcements.enabled={{ cilium_l2_announcements_enabled }} \
+      --set l2announcements.leaseDuration={{ cilium_l2_announcements_lease_duration }} \
+      --set l2announcements.leaseRenewDeadline={{ cilium_l2_announcements_lease_renew_deadline }} \
+      --set l2announcements.leaseRetryPeriod={{ cilium_l2_announcements_lease_retry_period }} \
+      --set hubble.enabled={{ cilium_hubble_enabled }} \
+      --set hubble.relay.enabled={{ cilium_hubble_relay_enabled }} \
+      --set hubble.ui.enabled={{ cilium_hubble_ui_enabled }} \
+      --set hubble.metrics.enabled={{ cilium_hubble_metrics | quote }} \
+      --set prometheus.enabled={{ cilium_prometheus_enabled }} \
+      --set operator.prometheus.enabled={{ cilium_operator_prometheus_enabled }} \
+      --set k8sClientRateLimit.qps={{ cilium_k8s_client_rate_limit_qps }} \
+      --set k8sClientRateLimit.burst={{ cilium_k8s_client_rate_limit_burst }} \
+      --wait
+  when: cilium_check.stdout == "not_installed"
+  register: cilium_install
+  retries: 2
+  delay: 10
+  until: cilium_install.rc == 0
+
+# ─────────────────────────────────────────────────────
+# 7. VERIFICARE CILIUM ȘI AȘTEPTARE READY
+# ─────────────────────────────────────────────────────
+
+- name: "[7/7] Așteptare pod-uri Cilium să fie Running in kube-system (max 5 minute)"
+  shell: |
+    TOTAL=$(k3s kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | wc -l)
+    RUNNING=$(k3s kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -c " Running " || true)
+    if [ "$TOTAL" -gt 0 ] && [ "$RUNNING" -eq "$TOTAL" ]; then
+      echo "all_running"
+    else
+      echo "waiting: $RUNNING/$TOTAL running"
+    fi
+  register: cilium_pods_status
+  until: cilium_pods_status.stdout.strip() == "all_running"
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: "[7/7] Așteptare noduri să devină Ready"
+  shell: |
+    TOTAL=$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l)
+    READY=$(k3s kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || true)
+    if [ "$TOTAL" -gt 0 ] && [ "$READY" -eq "$TOTAL" ]; then
+      echo "all_ready"
+    else
+      echo "waiting: $READY/$TOTAL ready"
+    fi
+  register: nodes_ready_status
+  until: nodes_ready_status.stdout.strip() == "all_ready"
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: "[7/7] Afișare status pod-uri Cilium"
+  shell: k3s kubectl get pods -n kube-system -l k8s-app=cilium -o wide
+  register: cilium_pods_final
+  changed_when: false
+
+- name: "[7/7] Afișare status noduri cluster"
+  shell: k3s kubectl get nodes -o wide
+  register: nodes_status
+  changed_when: false
+
+- name: "[7/7] Verificare status Cilium"
+  shell: |
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    cilium status --wait 2>/dev/null || echo "Cilium status check completed"
+  register: cilium_status_check
+  changed_when: false
+  ignore_errors: true
+
+- name: "[7/7] 🎉 Raport final Cilium"
+  debug:
+    msg: |
+      ════════════════════════════════════════════════
+      ✅  CILIUM INSTALAT CU SUCCES!
+      ════════════════════════════════════════════════
+
+      📦 Pod-uri Cilium ({{ cilium_namespace }}):
+      {{ cilium_pods_final.stdout }}
+
+      🖥️  Noduri cluster:
+      {{ nodes_status.stdout }}
+
+      🔧 Configurație aplicată:
+        • Versiune Cilium     : {{ cilium_version }}
+        • Pod CIDR            : {{ cilium_pod_cidr }}
+        • K3s flags           : --flannel-backend=none --disable-network-policy ✔
+        • KubeProxy Replacement : {{ cilium_kube_proxy_replacement }}
+        • Hubble              : {{ cilium_hubble_enabled }}
+        • Hubble UI           : {{ cilium_hubble_ui_enabled }}
+        • NodePort            : {{ cilium_nodeport_enabled }}
+        • HostPort            : {{ cilium_hostport_enabled }}
+        • ExternalIPs         : {{ cilium_external_ips_enabled }}
+        • Bandwidth Manager   : {{ cilium_bandwidth_manager_enabled }}
+        • L2 Announcements    : {{ cilium_l2_announcements_enabled }}
+
+      📊 Cilium Status:
+      {{ cilium_status_check.stdout }}
+
+      💡 Comenzi utile:
+        • cilium status         - Status Cilium
+        • cilium connectivity test - Test conectivitate
+        {% if cilium_hubble_enabled | bool %}
+        • cilium hubble port-forward & - Port forward Hubble UI
+        • hubble observe        - Observare trafic în timp real
+        {% endif %}
+
+      ════════════════════════════════════════════════
