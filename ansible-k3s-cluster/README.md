@@ -16,6 +16,7 @@ ansible-k3s-cluster/
 │   ├── reset.yml            # Dezinstalare simplă cluster
 │   ├── nuke.yml             # ⚠️  Ștergere TOTALĂ și ireversibilă K3s
 │   ├── calico.yml           # Instalare Calico CNI pe cluster
+│   ├── cilium.yml           # Instalare Cilium CNI pe cluster (eBPF)
 │   └── upgrade.yml          # Upgrade K3s
 └── roles/
     ├── common/              # Pregătire sistem (swap, pachete)
@@ -23,6 +24,7 @@ ansible-k3s-cluster/
     ├── k3s-agent/           # Instalare noduri worker (agent)
     ├── k3s-uninstall/       # Dezinstalare completă (folosit de nuke.yml)
     ├── calico/              # Instalare Calico CNI (NetworkPolicy)
+    ├── cilium/              # Instalare Cilium CNI (eBPF-based)
     └── extras/              # Tool-uri adiționale (helm, kubectl alias)
 ```
 
@@ -113,6 +115,54 @@ Verificare manuală după instalare:
 ssh ubuntu@10.102.13.205 'sudo k3s kubectl get pods -n calico-system'
 ```
 
+### Instalare Cilium CNI (eBPF-based Observability)
+
+> **Cilium** înlocuiește Flannel cu o soluție eBPF-based pentru rețea și securitate. Oferă observabilitate avansată prin Hubble și performanță superioară. Rulează DOAR pe master.
+
+```bash
+ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml
+```
+
+**Cerințe:** Kernel 5.10+ pentru toate feature-urile eBPF (Ubuntu 22.04+ include kernel 5.15+)
+
+**Ce face:**
+- Configurează K3s pentru CNI extern:
+   - `flannel-backend: none`
+   - `disable-network-policy: true`
+- Restartează K3s (~30-60s downtime)
+- Verifică explicit că nodurile sunt `NotReady` (stare normală fără CNI)
+- Instalează **Cilium CLI** pe master
+- Instalează **Cilium CNI** cu eBPF și Hubble
+- Configurează kube-proxy replacement (strict mode)
+- Așteaptă să fie toate pod-urile `cilium` în starea `Running`
+- Verifică că nodurile devin `Ready`
+
+**Pentru altă versiune Cilium:**
+```bash
+ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml -e "cilium_version=v1.15.0"
+```
+
+**Fără Hubble (observability):**
+```bash
+ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml -e "cilium_hubble_enabled=false"
+```
+
+**Verificare manuală după instalare:**
+```bash
+# Status Cilium
+ssh ubuntu@<master-ip> 'sudo cilium status'
+
+# Pod-uri Cilium
+ssh ubuntu@<master-ip> 'sudo k3s kubectl get pods -n cilium'
+
+# Test conectivitate
+ssh ubuntu@<master-ip> 'sudo cilium connectivity test'
+
+# Hubble UI (port-forward local)
+ssh -L 8080:localhost:8080 ubuntu@<master-ip> 'sudo cilium hubble port-forward &'
+# Apoi accesează: http://localhost:8080
+```
+
 ### ⚠️  Ștergere TOTALĂ (NUKE) — elimină K3s complet de pe toate nodurile
 
 > **ATENȚIE:** Operațiunea este **ireversibilă**! Șterge tot: binare, date, rețea, iptables, helm.
@@ -156,3 +206,19 @@ kubectl get nodes
 | `k3s_server_args` | `--disable traefik` | Argumente suplimentare pentru server |
 | `install_helm` | `true` | Instalează Helm 3 |
 | `install_longhorn` | `false` | Instalează Longhorn pentru storage |
+| `cilium_version` | `v1.19.2` | Versiunea Cilium CNI |
+| `cilium_k8s_service_host` | `ansible_host` | IP API server K8s |
+| `cilium_k8s_service_port` | `6443` | Port API server K8s |
+| `cilium_kube_proxy_replacement` | `true` | Înlocuiește kube-proxy |
+| `cilium_hubble_enabled` | `true` | Activează Hubble observability |
+| `cilium_hubble_relay_enabled` | `true` | Activează Hubble Relay |
+| `cilium_hubble_ui_enabled` | `true` | Activează Hubble UI |
+| `cilium_hubble_metrics` | `{dns,drop,tcp,flow,icmp,http}` | Metrici Hubble |
+| `cilium_prometheus_enabled` | `true` | Prometheus pentru Cilium |
+| `cilium_operator_prometheus_enabled` | `true` | Prometheus pentru Operator |
+| `cilium_l2_announcements_enabled` | `true` | L2 announcements pentru LB |
+| `cilium_l2_announcements_lease_duration` | `10s` | Lease duration |
+| `cilium_l2_announcements_lease_renew_deadline` | `5s` | Renew deadline |
+| `cilium_l2_announcements_lease_retry_period` | `1s` | Retry period |
+| `cilium_k8s_client_rate_limit_qps` | `25` | QPS rate limit |
+| `cilium_k8s_client_rate_limit_burst` | `50` | Burst rate limit |

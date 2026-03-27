@@ -1,0 +1,82 @@
+---
+# Playbook: fix-cilium-interfaces.yml
+# Curăță interfețele de rețea conflictuale și restartează Cilium
+
+- name: "🔧 Fix Cilium vxlan interface conflicts"
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "Oprire K3s"
+      systemd:
+        name: "{{ 'k3s' if inventory_hostname in groups['k3s_masters'] else 'k3s-agent' }}"
+        state: stopped
+
+    - name: "Așteptare 5 secunde"
+      pause:
+        seconds: 5
+
+    - name: "Ștergere interfețe Cilium/Flannel conflictuale"
+      shell: |
+        for iface in cilium_vxlan cilium_net cilium_host flannel.1 flannel.1 cni0 vxlan; do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+      ignore_errors: true
+
+    - name: "Curățare reguli iptables Cilium"
+      shell: |
+        iptables-save 2>/dev/null | grep -v CILIUM | grep -v cilium | iptables-restore 2>/dev/null || true
+        ip6tables-save 2>/dev/null | grep -v CILIUM | grep -v cilium | ip6tables-restore 2>/dev/null || true
+      ignore_errors: true
+
+    - name: "Ștergere fișiere CNI vechi"
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni/net.d
+        - /var/lib/cni
+      ignore_errors: true
+
+    - name: "Recreează directoarele CNI necesare pentru Cilium"
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/cni/net.d
+        - /var/lib/cni
+      ignore_errors: true
+
+    - name: "Pornire K3s"
+      systemd:
+        name: "{{ 'k3s' if inventory_hostname in groups['k3s_masters'] else 'k3s-agent' }}"
+        state: started
+
+    - name: "Așteptare serviciu K3s"
+      wait_for:
+        timeout: 30
+
+- name: "📊 Așteptare Cilium să fie Ready"
+  hosts: k3s_masters
+  become: true
+  tasks:
+    - name: "Așteptare Cilium daemonset"
+      shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        kubectl rollout status daemonset cilium -n kube-system --timeout=300s
+      register: cilium_rollout
+      retries: 3
+      delay: 10
+
+    - name: "Status Cilium final"
+      shell: |
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        cilium status
+      register: final_status
+      changed_when: false
+
+    - name: "Afișare status"
+      debug:
+        msg: "{{ final_status.stdout }}"
