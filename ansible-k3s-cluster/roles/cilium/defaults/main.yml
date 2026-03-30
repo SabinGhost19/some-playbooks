@@ -1,0 +1,34 @@
+---
+# Default variables for Cilium CNI
+# Documentatie: https://docs.cilium.io/en/stable/installation/k3s/
+
+# Versiunea Cilium de instalat
+# Verifica ultimele versiuni la: https://github.com/cilium/cilium/releases
+cilium_version: "v1.19.2"
+
+# K8s API server configuration (seteaza automat din ansible_host daca e null)
+cilium_k8s_service_host: ""
+cilium_k8s_service_port: "6443"
+
+# Kube-proxy replacement (true = inlocuieste complet kube-proxy cu eBPF)
+cilium_kube_proxy_replacement: "true"
+
+# L2 announcements (pentru LoadBalancer services pe bare metal)
+cilium_l2_announcements_enabled: "true"
+cilium_l2_announcements_lease_duration: "10s"
+cilium_l2_announcements_lease_renew_deadline: "5s"
+cilium_l2_announcements_lease_retry_period: "1s"
+
+# Hubble observability
+cilium_hubble_enabled: "true"
+cilium_hubble_relay_enabled: "true"
+cilium_hubble_ui_enabled: "true"
+cilium_hubble_metrics: "{dns,drop,tcp,flow,icmp,http}"
+
+# Prometheus metrics
+cilium_prometheus_enabled: "true"
+cilium_operator_prometheus_enabled: "true"
+
+# K8s client rate limiting
+cilium_k8s_client_rate_limit_qps: "25"
+cilium_k8s_client_rate_limit_burst: "50"

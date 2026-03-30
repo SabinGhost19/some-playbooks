@@ -1,0 +1,126 @@
+---
+# =============================================================
+# PLAYBOOK: cilium.yml — Instalare Cilium CNI pe cluster K3s
+# =============================================================
+#
+# Ce face acest playbook:
+#  1. Reconfigurează K3s pe master pentru CNI extern:
+#     --flannel-backend=none + --disable-network-policy
+#  2. Restartează K3s și verifică explicit că nodurile trec în NotReady (fără CNI)
+#  3. Instalează Cilium CLI pe master
+#  4. Instalează Cilium CNI cu eBPF
+#  5. Verifică că nodurile devin Ready și Cilium rulează
+#
+# ⚠️  PREREQUISITE: Clusterul K3s trebuie să fie deja instalat!
+#     Dacă nu, rulează mai întâi: ansible-playbook -i inventory/hosts.ini playbooks/site.yml
+#
+# Rulare:
+#   ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml
+#
+# Rulare cu altă versiune de Cilium:
+#   ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml -e "cilium_version=v1.15.0"
+#
+# Rulare fără Hubble:
+#   ansible-playbook -i inventory/hosts.ini playbooks/cilium.yml -e "cilium_hubble_enabled=false"
+# =============================================================
+
+- name: "🔵 Instalare Cilium CNI pe nodul master K3s"
+  hosts: k3s_masters
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+    - name: cilium_confirm
+      prompt: |
+
+        ════════════════════════════════════════════
+        🔵 INSTALARE CILIUM CNI
+        ════════════════════════════════════════════
+        Acest playbook va:
+          1. Reconfigura K3s pentru CNI extern:
+             --flannel-backend=none
+             --disable-network-policy
+          2. Restarta K3s (downtime ~30-60 secunde)
+          3. Verifica noduri în stare NotReady (normal fără CNI)
+          4. Instala Cilium {{ cilium_version | default('v1.16.0') }} pe cluster
+          5. Folosi CIDR: {{ pod_network_cidr | default('10.42.0.0/16') }}
+          6. Instala Cilium CLI și Cilium CNI (eBPF-based)
+
+        ⚠️  REQUIRES: Kernel 5.10+ pentru toate feature-urile eBPF
+
+        Continui? (yes/no)
+      private: false
+
+  pre_tasks:
+    - name: Verificare confirmare
+      fail:
+        msg: "❌ Instalare anulată de utilizator."
+      when: cilium_confirm != "yes"
+
+    - name: "📋 Info cluster înainte de instalare"
+      shell: k3s kubectl get nodes -o wide 2>/dev/null || echo "K3s not responding yet"
+      register: pre_nodes
+      changed_when: false
+      ignore_errors: true
+
+    - name: "📋 Noduri curente"
+      debug:
+        msg: "{{ pre_nodes.stdout_lines }}"
+
+  roles:
+    - cilium
+
+  post_tasks:
+    - name: "📋 Status final cluster"
+      shell: |
+        echo "=== NODES ==="
+        k3s kubectl get nodes -o wide
+        echo ""
+        echo "=== CILIUM PODS ==="
+        k3s kubectl get pods -n cilium -o wide
+        echo ""
+        echo "=== CILIUM DAEMONSET ==="
+        k3s kubectl get daemonset -n cilium -o wide 2>/dev/null || true
+        {% if cilium_hubble_enabled | default(true) | bool %}
+        echo ""
+        echo "=== HUBBLE STATUS ==="
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        cilium status 2>/dev/null | head -30 || echo "Cilium CLI not ready yet"
+        {% endif %}
+      register: final_status
+      changed_when: false
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: "📋 Raport status cluster"
+      debug:
+        msg: "{{ final_status.stdout_lines }}"
+
+    - name: "📝 Instrucțiuni post-instalare"
+      debug:
+        msg: |
+          ════════════════════════════════════════════════════════
+          🎉 CILIUM A FOST INSTALAT CU SUCCES!
+          ════════════════════════════════════════════════════════
+
+          💡 Comenzi utile:
+
+          1. Verificare status Cilium:
+             ssh {{ ansible_user }}@{{ ansible_host }} 'sudo cilium status'
+
+          2. Test conectivitate:
+             ssh {{ ansible_user }}@{{ ansible_host }} 'sudo cilium connectivity test'
+
+          {% if cilium_hubble_enabled | default(true) | bool %}
+          3. Accesare Hubble UI (port-forward):
+             ssh {{ ansible_user }}@{{ ansible_host }} -L 8080:localhost:8080 'sudo cilium hubble port-forward &'
+             Apoi accesează: http://localhost:8080 în browser
+
+          4. Observare trafic în timp real:
+             ssh {{ ansible_user }}@{{ ansible_host }} 'sudo cilium hubble observe -f'
+          {% endif %}
+
+          5. Verificare NetworkPolicy (Cilium supports L3/L4/L7):
+             kubectl get networkpolicies -A
+
+          ════════════════════════════════════════════════════════
